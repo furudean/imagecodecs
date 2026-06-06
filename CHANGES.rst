@@ -1,6 +1,17 @@
 Revisions
 =========
 
+2026.6.6
+
+- Limit IntEnum parameters to documented values (breaking).
+- Optimize lzw_decode and remove buffersize parameter (breaking).
+- Fix floatpred_encode for zero-stride data (#138).
+- Add ZSTD1 codec with optional hilo byte shuffle and BGR to RGB conversion.
+- Add cms_info function.
+- Add spng_encode filter parameter.
+- Add Zarr 3 compatible PCX and TGA codecs.
+- Support Python 3.15.
+
 2026.5.10
 
 - Add Zarr 3 compatible codecs.
