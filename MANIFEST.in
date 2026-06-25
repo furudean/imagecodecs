@@ -3,8 +3,9 @@ include README.rst
 include CHANGES.rst
 include pyproject.toml
 
-exclude testimages.py
+exclude *.py
 
+include setup.py
 include imagecodecs/py.typed
 
 include imagecodecs/*.c
@@ -42,6 +43,7 @@ include tests/data/*.apng
 include tests/data/*.avif
 include tests/data/*.webp
 include tests/data/*.br
+include tests/data/*.zl
 include tests/data/tiff/*.tif
 include tests/data/ljpeg/*.ljp
 include tests/data/lerc/*.*
