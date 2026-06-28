@@ -1,6 +1,17 @@
 Revisions
 =========
 
+2026.6.26
+
+- Add B2ND codec based on Blosc2 library.
+- Add ISAL codec based on ISA-L library (handles deflate, zlib, and gzip).
+- Add OPENZL codec based on OpenZL library (currently Windows and decode only).
+- Add block_size, prog_order, and profile parameters to htj2k_encode.
+- Add fancyupsampling parameter to jpeg decoder functions.
+- Fix tiff_encode modifies input array.
+- Avoid unnecessary memory initialization.
+- Optimize LZW codec.
+
 2026.6.6
 
 - Limit IntEnum parameters to documented values (breaking).
