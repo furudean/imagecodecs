@@ -59,6 +59,7 @@ exclude tests/data/ljpeg/2ch.ljp
 exclude tests/data/ljpeg/pvrg.ljp
 exclude tests/data/bcn/*.dds
 exclude tests/data/33792x79872.jpg
+exclude tests/data/lz4.sdt
 exclude tests/data/jpegxr.czi
 exclude tests/data/jetraw.bin
 exclude tests/data/huge.bin
