@@ -40,6 +40,188 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 using Microsoft::WRL::ComPtr;
 
+/*
+ * SEH-safe wrappers around WIC COM calls.
+ *
+ * WIC can raise structured exceptions (e.g. STATUS_NOT_IMPLEMENTED)
+ * when parsing truncated or malformed images. These helpers catch
+ * any SEH exception and return a non-zero HRESULT so callers can
+ * report a clean error instead of crashing.
+ */
+
+static __declspec(noinline) HRESULT
+seh_create_decoder(
+    IWICImagingFactory* factory,
+    IStream* stream,
+    IWICBitmapDecoder** decoder)
+{
+    __try {
+        return factory->CreateDecoderFromStream(
+            stream,
+            nullptr,
+            WICDecodeMetadataCacheOnDemand,
+            decoder
+        );
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return (HRESULT)GetExceptionCode();
+    }
+}
+
+static __declspec(noinline) HRESULT
+seh_get_frame_count(
+    IWICBitmapDecoder* decoder,
+    UINT* count)
+{
+    __try {
+        return decoder->GetFrameCount(count);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return (HRESULT)GetExceptionCode();
+    }
+}
+
+static __declspec(noinline) HRESULT
+seh_get_frame(
+    IWICBitmapDecoder* decoder,
+    UINT index,
+    IWICBitmapFrameDecode** frame)
+{
+    __try {
+        return decoder->GetFrame(index, frame);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return (HRESULT)GetExceptionCode();
+    }
+}
+
+static __declspec(noinline) HRESULT
+seh_get_pixel_format(
+    IWICBitmapFrameDecode* frame,
+    WICPixelFormatGUID* fmt)
+{
+    __try {
+        return frame->GetPixelFormat(fmt);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return (HRESULT)GetExceptionCode();
+    }
+}
+
+static __declspec(noinline) HRESULT
+seh_get_size(
+    IWICBitmapFrameDecode* frame,
+    UINT* w,
+    UINT* h)
+{
+    __try {
+        return frame->GetSize(w, h);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return (HRESULT)GetExceptionCode();
+    }
+}
+
+static __declspec(noinline) HRESULT
+seh_copy_pixels_frame(
+    IWICBitmapFrameDecode* frame,
+    UINT stride,
+    UINT bufsize,
+    BYTE* buf)
+{
+    __try {
+        return frame->CopyPixels(nullptr, stride, bufsize, buf);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return (HRESULT)GetExceptionCode();
+    }
+}
+
+static __declspec(noinline) HRESULT
+seh_create_format_converter(
+    IWICImagingFactory* factory,
+    IWICFormatConverter** conv)
+{
+    __try {
+        return factory->CreateFormatConverter(conv);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return (HRESULT)GetExceptionCode();
+    }
+}
+
+static __declspec(noinline) HRESULT
+seh_converter_init(
+    IWICFormatConverter* conv,
+    IWICBitmapFrameDecode* frame,
+    const WICPixelFormatGUID& fmt)
+{
+    __try {
+        return conv->Initialize(
+            frame,
+            fmt,
+            WICBitmapDitherTypeNone,
+            nullptr,
+            0.0,
+            WICBitmapPaletteTypeCustom
+        );
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return (HRESULT)GetExceptionCode();
+    }
+}
+
+static __declspec(noinline) HRESULT
+seh_copy_pixels_conv(
+    IWICFormatConverter* conv,
+    UINT stride,
+    UINT bufsize,
+    BYTE* buf)
+{
+    __try {
+        return conv->CopyPixels(nullptr, stride, bufsize, buf);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return (HRESULT)GetExceptionCode();
+    }
+}
+
+/* SEH-safe wrapper for determine_target_format's slow-path COM queries.
+ * Uses raw pointers only in the __try scope. */
+static __declspec(noinline) void
+seh_query_pixel_format_info(
+    IWICImagingFactory* factory,
+    const WICPixelFormatGUID& srcFormat,
+    UINT* channelCount,
+    UINT* bitsPerPixel)
+{
+    *channelCount = 0;
+    *bitsPerPixel = 0;
+    __try {
+        IWICComponentInfo* compInfo = nullptr;
+        if (FAILED(factory->CreateComponentInfo(srcFormat, &compInfo)))
+            return;
+        IWICPixelFormatInfo* pixInfo = nullptr;
+        if (
+            SUCCEEDED(
+            compInfo->QueryInterface(
+            __uuidof(IWICPixelFormatInfo),
+            reinterpret_cast<void**>(&pixInfo)
+            )
+        ))
+        {
+            pixInfo->GetChannelCount(channelCount);
+            pixInfo->GetBitsPerPixel(bitsPerPixel);
+            pixInfo->Release();
+        }
+        compInfo->Release();
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        *channelCount = 0;
+        *bitsPerPixel = 0;
+    }
+}
+
 namespace {
 
 /* Module-level factory singleton.
@@ -73,8 +255,11 @@ wic_host_thread_proc(LPVOID lpReady)
     if (SUCCEEDED(hr)) {
         g_com_initialized = true;
         hr = CoCreateInstance(
-            CLSID_WICImagingFactory, nullptr,
-            CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&g_factory));
+            CLSID_WICImagingFactory,
+            nullptr,
+            CLSCTX_INPROC_SERVER,
+            IID_PPV_ARGS(&g_factory)
+        );
         if (FAILED(hr)) {
             CoUninitialize();
             g_com_initialized = false;
@@ -110,7 +295,8 @@ public:
         REFIID riid, void** ppv) noexcept override
     {
         if (!ppv) return E_POINTER;
-        if (IsEqualGUID(riid, __uuidof(IUnknown))
+        if (
+            IsEqualGUID(riid, __uuidof(IUnknown))
             || IsEqualGUID(riid, __uuidof(ISequentialStream))
             || IsEqualGUID(riid, __uuidof(IStream)))
         {
@@ -161,7 +347,8 @@ public:
         ULARGE_INTEGER* plibNewPosition) noexcept override
     {
         LONGLONG np;
-        switch (dwOrigin) {
+        switch (dwOrigin)
+        {
             case STREAM_SEEK_SET:
                 np = dlibMove.QuadPart; break;
             case STREAM_SEEK_CUR:
@@ -183,15 +370,17 @@ public:
     }
 
     HRESULT STDMETHODCALLTYPE CopyTo(
-        IStream*, ULARGE_INTEGER,
-        ULARGE_INTEGER*, ULARGE_INTEGER*) noexcept override
+        IStream*,
+        ULARGE_INTEGER,
+        ULARGE_INTEGER*,
+        ULARGE_INTEGER*) noexcept override
     {
         return E_NOTIMPL;
     }
 
     HRESULT STDMETHODCALLTYPE Commit(DWORD) noexcept override
     {
-        return S_OK;  /* no-op for read-only stream */
+        return S_OK;      /* no-op for read-only stream */
     }
 
     HRESULT STDMETHODCALLTYPE Revert() noexcept override
@@ -227,10 +416,10 @@ public:
     }
 
 private:
-    LONG m_refcount;
-    const uint8_t* m_data;
-    size_t m_size;
-    size_t m_pos;
+LONG m_refcount;
+const uint8_t* m_data;
+size_t m_size;
+size_t m_pos;
 };
 
 /* Create a read-only IStream wrapping [data, data+size).
@@ -254,7 +443,7 @@ class GrowIStream final : public IStream {
 public:
     GrowIStream() noexcept
         : m_refcount(1), m_data(nullptr), m_size(0),
-          m_capacity(0), m_pos(0) {}
+        m_capacity(0), m_pos(0) {}
 
     ~GrowIStream()
     {
@@ -276,10 +465,12 @@ public:
     /* IUnknown */
 
     HRESULT STDMETHODCALLTYPE QueryInterface(
-        REFIID riid, void** ppv) noexcept override
+        REFIID riid,
+        void** ppv) noexcept override
     {
         if (!ppv) return E_POINTER;
-        if (IsEqualGUID(riid, __uuidof(IUnknown))
+        if (
+            IsEqualGUID(riid, __uuidof(IUnknown))
             || IsEqualGUID(riid, __uuidof(ISequentialStream))
             || IsEqualGUID(riid, __uuidof(IStream)))
         {
@@ -309,7 +500,7 @@ public:
         void* pv, ULONG cb, ULONG* pcbRead) noexcept override
     {
         ULONG avail = (m_pos < m_size)
-            ? (ULONG)(m_size - m_pos) : 0;
+                ? (ULONG)(m_size - m_pos) : 0;
         ULONG n = cb < avail ? cb : avail;
         if (n > 0) memcpy(pv, m_data + m_pos, n);
         m_pos += n;
@@ -325,7 +516,7 @@ public:
             return S_OK;
         }
         size_t end = m_pos + cb;
-        if (end < m_pos) return STG_E_MEDIUMFULL;  /* overflow */
+        if (end < m_pos) return STG_E_MEDIUMFULL;      /* overflow */
         if (end > m_capacity) {
             size_t newcap = m_capacity ? m_capacity : 4096;
             while (newcap < end) {
@@ -352,7 +543,8 @@ public:
         ULARGE_INTEGER* plibNewPosition) noexcept override
     {
         LONGLONG np;
-        switch (dwOrigin) {
+        switch (dwOrigin)
+        {
             case STREAM_SEEK_SET:
                 np = dlibMove.QuadPart; break;
             case STREAM_SEEK_CUR:
@@ -386,8 +578,10 @@ public:
     }
 
     HRESULT STDMETHODCALLTYPE CopyTo(
-        IStream*, ULARGE_INTEGER,
-        ULARGE_INTEGER*, ULARGE_INTEGER*) noexcept override
+        IStream*,
+        ULARGE_INTEGER,
+        ULARGE_INTEGER*,
+        ULARGE_INTEGER*) noexcept override
     {
         return E_NOTIMPL;
     }
@@ -424,12 +618,13 @@ public:
         return S_OK;
     }
 
-    HRESULT STDMETHODCALLTYPE Clone(IStream**) noexcept override
+    HRESULT STDMETHODCALLTYPE Clone(
+        IStream**) noexcept override
     {
         return E_NOTIMPL;
     }
 
-private:
+    private:
     LONG m_refcount;
     uint8_t* m_data;
     size_t m_size;
@@ -484,17 +679,13 @@ determine_target_format(
     components = 4;
     bpc = 8;
 
-    ComPtr<IWICComponentInfo> compInfo;
-    HRESULT hr = pFactory->CreateComponentInfo(srcFormat, &compInfo);
-    if (FAILED(hr)) return;
-
-    ComPtr<IWICPixelFormatInfo> pixInfo;
-    hr = compInfo.As(&pixInfo);
-    if (FAILED(hr)) return;
-
     UINT channelCount = 0, bitsPerPixel = 0;
-    pixInfo->GetChannelCount(&channelCount);
-    pixInfo->GetBitsPerPixel(&bitsPerPixel);
+    seh_query_pixel_format_info(
+        pFactory,
+        srcFormat,
+        &channelCount,
+        &bitsPerPixel
+    );
     if (channelCount == 0) return;
 
     const UINT bpcSource = bitsPerPixel / channelCount;
@@ -540,7 +731,8 @@ determine_target_format(
 bool
 format_to_container_guid(int32_t format, GUID& guid) noexcept
 {
-    switch (format) {
+    switch (format)
+    {
         case WIC_FORMAT_BMP:  guid = GUID_ContainerFormatBmp;  return true;
         case WIC_FORMAT_PNG:  guid = GUID_ContainerFormatPng;  return true;
         case WIC_FORMAT_JPEG: guid = GUID_ContainerFormatJpeg; return true;
@@ -559,14 +751,16 @@ pixel_format_guid(
     uint32_t components, uint32_t bpc, WICPixelFormatGUID& fmt) noexcept
 {
     if (bpc == 8) {
-        switch (components) {
+        switch (components)
+        {
             case 1: fmt = GUID_WICPixelFormat8bppGray;  return true;
             case 3: fmt = GUID_WICPixelFormat24bppRGB;  return true;
             case 4: fmt = GUID_WICPixelFormat32bppRGBA; return true;
         }
     }
     else if (bpc == 16) {
-        switch (components) {
+        switch (components)
+        {
             case 1: fmt = GUID_WICPixelFormat16bppGray; return true;
             case 3: fmt = GUID_WICPixelFormat48bppRGB;  return true;
             case 4: fmt = GUID_WICPixelFormat64bppRGBA; return true;
@@ -580,37 +774,46 @@ pixel_format_guid(
 extern "C" int32_t
 wic_factory_init(void)
 {
-    std::call_once(g_init_once, []() {
-        HANDLE hReady = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-        if (!hReady) {
-            g_init_hr = HRESULT_FROM_WIN32(GetLastError());
-            return;
-        }
-        g_exit_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-        if (!g_exit_event) {
+    std::call_once(
+        g_init_once,
+        []() {
+            HANDLE hReady = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            if (!hReady) {
+                g_init_hr = HRESULT_FROM_WIN32(GetLastError());
+                return;
+            }
+            g_exit_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            if (!g_exit_event) {
+                CloseHandle(hReady);
+                g_init_hr = HRESULT_FROM_WIN32(GetLastError());
+                return;
+            }
+            g_host_thread = CreateThread(
+                nullptr,
+                0,
+                wic_host_thread_proc,
+                &hReady,
+                0,
+                nullptr
+            );
+            if (!g_host_thread) {
+                g_init_hr = HRESULT_FROM_WIN32(GetLastError());
+                CloseHandle(g_exit_event); g_exit_event = nullptr;
+                CloseHandle(hReady);
+                return;
+            }
+            /* wait for the background thread to finish COM/factory init. */
+            WaitForSingleObject(hReady, INFINITE);
             CloseHandle(hReady);
-            g_init_hr = HRESULT_FROM_WIN32(GetLastError());
-            return;
+            if (FAILED(g_init_hr)) {
+                /* init failed; clean up the background thread. */
+                SetEvent(g_exit_event);
+                WaitForSingleObject(g_host_thread, INFINITE);
+                CloseHandle(g_host_thread); g_host_thread = nullptr;
+                CloseHandle(g_exit_event); g_exit_event = nullptr;
+            }
         }
-        g_host_thread = CreateThread(
-            nullptr, 0, wic_host_thread_proc, &hReady, 0, nullptr);
-        if (!g_host_thread) {
-            g_init_hr = HRESULT_FROM_WIN32(GetLastError());
-            CloseHandle(g_exit_event); g_exit_event = nullptr;
-            CloseHandle(hReady);
-            return;
-        }
-        /* wait for the background thread to finish COM/factory init. */
-        WaitForSingleObject(hReady, INFINITE);
-        CloseHandle(hReady);
-        if (FAILED(g_init_hr)) {
-            /* init failed; clean up the background thread. */
-            SetEvent(g_exit_event);
-            WaitForSingleObject(g_host_thread, INFINITE);
-            CloseHandle(g_host_thread); g_host_thread = nullptr;
-            CloseHandle(g_exit_event); g_exit_event = nullptr;
-        }
-    });
+    );
     return (int32_t)g_init_hr;
 }
 
@@ -650,29 +853,27 @@ wic_get_info(
     if (!pStream) return (int32_t)E_OUTOFMEMORY;
 
     ComPtr<IWICBitmapDecoder> pDecoder;
-    HRESULT hr = g_factory->CreateDecoderFromStream(
-        pStream.Get(), nullptr,
-        WICDecodeMetadataCacheOnDemand, &pDecoder);
+    HRESULT hr = seh_create_decoder(g_factory.Get(), pStream.Get(), &pDecoder);
     if (FAILED(hr)) return (int32_t)hr;
 
     UINT frameCount = 0;
-    hr = pDecoder->GetFrameCount(&frameCount);
+    hr = seh_get_frame_count(pDecoder.Get(), &frameCount);
     if (FAILED(hr)) return (int32_t)hr;
     if (frame_count) *frame_count = frameCount;
 
     ComPtr<IWICBitmapFrameDecode> pFrame;
-    hr = pDecoder->GetFrame(0, &pFrame);
+    hr = seh_get_frame(pDecoder.Get(), 0, &pFrame);
     if (FAILED(hr)) return (int32_t)hr;
 
     WICPixelFormatGUID srcFmt, dstFmt;
-    hr = pFrame->GetPixelFormat(&srcFmt);
+    hr = seh_get_pixel_format(pFrame.Get(), &srcFmt);
     if (FAILED(hr)) return (int32_t)hr;
 
     uint32_t comp = 0, bpcVal = 0;
     determine_target_format(g_factory.Get(), srcFmt, dstFmt, comp, bpcVal);
 
     UINT w = 0, h = 0;
-    hr = pFrame->GetSize(&w, &h);
+    hr = seh_get_size(pFrame.Get(), &w, &h);
     if (FAILED(hr)) return (int32_t)hr;
 
     *width = w;
@@ -702,34 +903,42 @@ wic_copy_pixels(
     if (!pStream) return (int32_t)E_OUTOFMEMORY;
 
     ComPtr<IWICBitmapDecoder> pDecoder;
-    HRESULT hr = g_factory->CreateDecoderFromStream(
-        pStream.Get(), nullptr,
-        WICDecodeMetadataCacheOnDemand, &pDecoder);
+    HRESULT hr = seh_create_decoder(g_factory.Get(), pStream.Get(), &pDecoder);
     if (FAILED(hr)) return (int32_t)hr;
 
     UINT frameCount = 0;
-    hr = pDecoder->GetFrameCount(&frameCount);
+    hr = seh_get_frame_count(pDecoder.Get(), &frameCount);
     if (FAILED(hr)) return (int32_t)hr;
     if (frame_index >= frameCount) return (int32_t)E_INVALIDARG;
 
     ComPtr<IWICBitmapFrameDecode> pFrame;
-    hr = pDecoder->GetFrame(frame_index, &pFrame);
+    hr = seh_get_frame(pDecoder.Get(), frame_index, &pFrame);
     if (FAILED(hr)) return (int32_t)hr;
 
     WICPixelFormatGUID srcFmt, dstFmt;
-    hr = pFrame->GetPixelFormat(&srcFmt);
+    hr = seh_get_pixel_format(pFrame.Get(), &srcFmt);
     if (FAILED(hr)) return (int32_t)hr;
 
     uint32_t components = 0, bpcVal = 0;
     determine_target_format(
-        g_factory.Get(), srcFmt, dstFmt, components, bpcVal);
+        g_factory.Get(),
+        srcFmt,
+        dstFmt,
+        components,
+        bpcVal
+    );
 
     /* If already in the target format, copy directly from the frame.
      * Avoids WINCODEC_ERR_WRONGSTATE from codecs (e.g. JPEG XR) that
      * reject same-format IWICFormatConverter::Initialize calls.
      */
     if (IsEqualGUID(srcFmt, dstFmt)) {
-        hr = pFrame->CopyPixels(nullptr, dst_stride, (UINT)dst_size, dst);
+        hr = seh_copy_pixels_frame(
+            pFrame.Get(),
+            dst_stride,
+            (UINT)dst_size,
+            dst
+        );
         return (int32_t)hr;
     }
 
@@ -737,24 +946,27 @@ wic_copy_pixels(
     */
     auto try_convert = [&](const WICPixelFormatGUID& fmt) -> HRESULT {
         ComPtr<IWICFormatConverter> pConv;
-        HRESULT h = g_factory->CreateFormatConverter(&pConv);
+        HRESULT h = seh_create_format_converter(g_factory.Get(), &pConv);
         if (FAILED(h)) return h;
-        h = pConv->Initialize(
-            pFrame.Get(), fmt,
-            WICBitmapDitherTypeNone, nullptr, 0.0,
-            WICBitmapPaletteTypeCustom);
+        h = seh_converter_init(pConv.Get(), pFrame.Get(), fmt);
         if (FAILED(h)) return h;
-        return pConv->CopyPixels(nullptr, dst_stride, (UINT)dst_size, dst);
+        return seh_copy_pixels_conv(
+            pConv.Get(),
+            dst_stride,
+            (UINT)dst_size,
+            dst
+        );
     };
 
     hr = try_convert(dstFmt);
     if (FAILED(hr)) {
         /* verify buffer is large enough for RGBA 8-bit fallback */
         UINT w = 0, h = 0;
-        HRESULT hr2 = pFrame->GetSize(&w, &h);
+        HRESULT hr2 = seh_get_size(pFrame.Get(), &w, &h);
         if (FAILED(hr2)) return (int32_t)hr2;
         const size_t fallback_stride = (size_t)w * 4;
-        if (dst_stride < fallback_stride
+        if (
+            dst_stride < fallback_stride
             || dst_size < fallback_stride * h)
             return (int32_t)hr;  /* buffer too small for fallback */
         hr = try_convert(GUID_WICPixelFormat32bppRGBA);
@@ -777,7 +989,14 @@ wic_decode_(
 
     uint32_t width = 0, height = 0, components = 0, bpcVal = 0, frameCount = 0;
     int32_t hr = wic_get_info(
-        src, srcsize, &width, &height, &components, &bpcVal, &frameCount);
+        src,
+        srcsize,
+        &width,
+        &height,
+        &components,
+        &bpcVal,
+        &frameCount
+    );
     if (hr != 0) return hr;
 
     result->frame_count = frameCount;
@@ -795,7 +1014,9 @@ wic_decode_(
     if (!buf) return (int32_t)E_OUTOFMEMORY;
 
     hr = wic_copy_pixels(src, srcsize, frame_index, buf, stride, bufSize);
-    if (hr != 0) { free(buf); return hr; }
+    if (hr != 0) {
+        free(buf); return hr;
+    }
 
     result->data = buf;
     result->width = width;
@@ -816,9 +1037,11 @@ wic_check_(const uint8_t* src, size_t srcsize)
     if (!pStream) return -1;
 
     ComPtr<IWICBitmapDecoder> pDecoder;
-    HRESULT hr = g_factory->CreateDecoderFromStream(
-        pStream.Get(), nullptr,
-        WICDecodeMetadataCacheOnDemand, &pDecoder);
+    HRESULT hr = seh_create_decoder(
+        g_factory.Get(),
+        pStream.Get(),
+        &pDecoder
+    );
     return SUCCEEDED(hr) ? 1 : 0;
 }
 
@@ -912,8 +1135,14 @@ wic_encode_(
         /* create a WIC bitmap from the source pixels */
         ComPtr<IWICBitmap> pBitmap;
         hr = g_factory->CreateBitmapFromMemory(
-            width, height, pixelFormat, stride,
-            (UINT)bufSize, const_cast<BYTE*>(src), &pBitmap);
+            width,
+            height,
+            pixelFormat,
+            stride,
+            (UINT)bufSize,
+            const_cast<BYTE*>(src),
+            &pBitmap
+        );
         if (FAILED(hr)) return (int32_t)hr;
 
         ComPtr<IWICFormatConverter> pConv;
@@ -921,9 +1150,13 @@ wic_encode_(
         if (FAILED(hr)) return (int32_t)hr;
 
         hr = pConv->Initialize(
-            pBitmap.Get(), frameFormat,
-            WICBitmapDitherTypeNone, nullptr, 0.0,
-            WICBitmapPaletteTypeCustom);
+            pBitmap.Get(),
+            frameFormat,
+            WICBitmapDitherTypeNone,
+            nullptr,
+            0.0,
+            WICBitmapPaletteTypeCustom
+        );
         if (FAILED(hr)) return (int32_t)hr;
 
         hr = pFrame->WriteSource(pConv.Get(), nullptr);
@@ -931,7 +1164,11 @@ wic_encode_(
     }
     else {
         hr = pFrame->WritePixels(
-            height, stride, (UINT)bufSize, const_cast<BYTE*>(src));
+            height,
+            stride,
+            (UINT)bufSize,
+            const_cast<BYTE*>(src)
+        );
         if (FAILED(hr)) return (int32_t)hr;
     }
 
@@ -970,11 +1207,13 @@ wic_version_string(void)
             osvi.dwOSVersionInfoSize = sizeof(osvi);
             if (pRtlGetVersion(&osvi) == 0) {
                 snprintf(
-                    buf, sizeof(buf),
+                    buf,
+                    sizeof(buf),
                     "%lu.%lu.%lu",
                     (unsigned long)osvi.dwMajorVersion,
                     (unsigned long)osvi.dwMinorVersion,
-                    (unsigned long)osvi.dwBuildNumber);
+                    (unsigned long)osvi.dwBuildNumber
+                );
                 return buf;
             }
         }
