@@ -39,6 +39,7 @@ from ._shared cimport (
     IC_CMYK,
     IC_COMPLEX,
     IC_DEPTH,
+    IC_EMPTY,
     IC_EXTRA,
     IC_EXTRA_ASSOCALPHA,
     IC_EXTRA_UNASSALPHA,
@@ -92,9 +93,9 @@ from ._shared cimport (
 
 cdef inline size_t _align_size_t(size_t size) noexcept nogil:
     """Return size_t increased to next multiple of 64KB."""
-    return (size + 65536 - 1) // 65536 * 65536
+    return max((size + 65536 - 1) // 65536 * 65536, <size_t> 65536)
 
 
 cdef inline size_t _align_ssize_t(ssize_t size) noexcept nogil:
     """Return ssize_t increased to next multiple of 64KB."""
-    return (size + 65536 - 1) // 65536 * 65536
+    return max((size + 65536 - 1) // 65536 * 65536, <ssize_t> 65536)
