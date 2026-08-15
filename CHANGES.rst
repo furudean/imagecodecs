@@ -1,6 +1,26 @@
 Revisions
 =========
 
+2026.8.16
+
+- Add CHUNKED codec for experimental chunked compression in CZI files.
+- Change zarr Byteshuffle, Bitshuffle, Floatpred to ArrayByteCodec (breaking).
+- Remove axis parameter from Packbits zarr codecs (breaking).
+- Remove height and width parameters from Ccitt zarr codecs (breaking).
+- Fix codecs failing on empty or small input (#146, #147).
+- Fix zarr codecs squeezing planar dimension (#145).
+- Fix sperr_encode fails with non-contiguous input.
+- Fix lzw_decode writes to truncated output.
+- Fix tiff_decode fails to read 12-bit JPEG compressed TIFF files.
+- Fix jpegxl_encode fails to set distance=0 required by libjxl 0.12.
+- Add option to specify primaries and transferfunction in (a)png_encode (#142).
+- Map htj2k_encode level >= 1.0 to qfactor (breaking; require OpenJPH 0.31).
+- Accept float32 input in htj2k_encode (experimental).
+- Return HTJ2K images with nonlinear transform as float32 (breaking).
+- Improve EXR error handling.
+- Update JPEGXS codec to libjxs 3.0.2-ED3.
+- Add experimental support for Pyodide (core codecs only).
+
 2026.6.26
 
 - Add B2ND codec based on Blosc2 library.
