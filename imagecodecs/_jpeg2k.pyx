@@ -483,9 +483,14 @@ def jpeg2k_decode(
     planar=None,
     verbose=None,
     numthreads=None,
+    reduce=None,
     out=None,
 ):
-    """Return decoded JPEG2K image."""
+    """Return decoded JPEG2K image.
+
+    reduce, if given, discards that many resolution levels, halving both
+    resolution per level
+    """
     cdef:
         numpy.ndarray dst
         const uint8_t[::1] src = data
@@ -504,6 +509,8 @@ def jpeg2k_decode(
         int verbosity = int(verbose) if verbose else 0
         bytes sig
         bint contig = not planar
+        OPJ_UINT32 cp_reduce = 0 if reduce is None else <OPJ_UINT32> reduce
+        bint do_reduce = reduce is not None
 
     if data is out:
         raise ValueError('cannot decode in-place')
@@ -549,6 +556,8 @@ def jpeg2k_decode(
                         )
 
             opj_set_default_decoder_parameters(&parameters)
+            if do_reduce:
+                parameters.cp_reduce = cp_reduce
 
             ret = opj_setup_decoder(codec, &parameters)
             if ret == OPJ_FALSE:

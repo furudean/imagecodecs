@@ -2139,6 +2139,7 @@ def jpeg2k_decode(
     planar: bool | None = None,
     verbose: int | None = None,
     numthreads: int | None = None,
+    reduce: int | None = None,
     out: NDArray[Any] | None = None,
 ) -> NDArray[Any]: ...
 

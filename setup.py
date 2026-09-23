@@ -334,14 +334,31 @@ def customize_build_default(
     """
     del options['shared_utility_qualified_name']
 
-    extensions['jpeg2k']['include_dirs'].extend(
-        (
-            '/usr/include/openjpeg-2.3',
-            '/usr/include/openjpeg-2.4',
-            '/usr/include/openjpeg-2.5',
+    # IMAGECODECS_ONLY can prune an extension this function unconditionally
+    # touches below, out from under it
+    if 'jpeg2k' in extensions:
+        extensions['jpeg2k']['include_dirs'].extend(
+            (
+                '/usr/include/openjpeg-2.3',
+                '/usr/include/openjpeg-2.4',
+                '/usr/include/openjpeg-2.5',
+            )
         )
-    )
-    extensions['jpegxr']['include_dirs'].append('/usr/include/jxrlib')
+    if 'jpegxr' in extensions:
+        extensions['jpegxr']['include_dirs'].append('/usr/include/jxrlib')
+
+    # a build isolated by a pep517 frontend does not necessarily forward
+    # CPATH/LIBRARY_PATH to the compiler subprocess the way an interactive
+    # shell does, so a prefix handed in this way is read directly instead
+    prefix = os.environ.get('IMAGECODECS_LIBRARY_PREFIX')
+    if prefix:
+        include = os.path.join(prefix, 'include')
+        lib = os.path.join(prefix, 'lib')
+        for ext in extensions.values():
+            ext['include_dirs'].extend(
+                (include, os.path.join(include, 'openjpeg-2.5'))
+            )
+            ext.setdefault('library_dirs', []).append(lib)
 
     # Ubuntu still using libjpeg-turbo 2
     # if not os.environ.get('IMAGECODECS_JPEG8_LEGACY', ''):
